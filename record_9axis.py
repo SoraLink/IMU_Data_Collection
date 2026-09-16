@@ -41,7 +41,8 @@ from datetime import datetime, timezone
 
 import xsensdeviceapi as xda
 
-from pipeline import SENSOR_MAP, RADIO_CHANNEL, DESIRED_RATE, find_master
+from skeleton import SENSOR_MAP
+from pipeline import RADIO_CHANNEL, DESIRED_RATE, find_master
 
 OUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
@@ -106,6 +107,33 @@ class Recorder(xda.XsCallback):
             return len(self.rows)
 
 
+def device_property(dev, names):
+    """Read the first of `names` this SDK build actually implements.
+
+    The Windows build spells the full-scale-range getters actualAccelerometerRange
+    / actualGyroscopeRange; the Linux 2022.2 build drops the prefix. Trying both
+    keeps one metadata.json schema across platforms.
+    """
+    missing = []
+    for name in names:
+        try:
+            value = getattr(dev, name)()
+        except AttributeError as e:
+            missing.append(str(e))
+            continue
+        except Exception as e:
+            return f"unavailable ({e})"
+        if isinstance(value, (int, float)):
+            # numpy scalars pass this check but are not json-serialisable.
+            return value.item() if hasattr(value, "item") else value
+        # XsVersion and friends str() to a useless SWIG proxy repr.
+        for render in ("toSimpleString", "toXsString"):
+            if hasattr(value, render):
+                return str(getattr(value, render)())
+        return str(value)
+    return f"unavailable ({'; '.join(missing)})"
+
+
 def packet_loss(rows):
     """Gaps in the 16-bit packet counter -> dropped samples that never arrived."""
     counters = [r[0] for r in rows if r[0] is not None]
@@ -117,9 +145,10 @@ def packet_loss(rows):
         expected += step
         if step > 1:
             gaps += step - 1
-    return {"received": len(counters), "expected_span": expected + 1,
-            "missing": gaps,
-            "loss_pct": round(100.0 * gaps / max(expected + 1, 1), 4)}
+    # int() because the counters arrive as numpy scalars, which json rejects.
+    return {"received": len(counters), "expected_span": int(expected) + 1,
+            "missing": int(gaps),
+            "loss_pct": round(100.0 * int(gaps) / max(int(expected) + 1, 1), 4)}
 
 
 def main():
@@ -130,6 +159,15 @@ def main():
                     help="stop automatically after this long (default: Ctrl+C)")
     ap.add_argument("--notes", default="", help="free-text note stored in metadata")
     ap.add_argument("--no-mtb", action="store_true", help="skip the .mtb log")
+    ap.add_argument("--release-radio", action="store_true",
+                    help="disable the radio on exit, which powers every MTw "
+                         "down. Off by default so consecutive takes don't need "
+                         "all 17 sensors switched on again by hand; use it when "
+                         "you're finished and want to save their batteries")
+    ap.add_argument("--connect-timeout", type=float, default=300.0,
+                    help="seconds to wait for the MTws to join (default 300). "
+                         "They join within seconds of being switched on, so this "
+                         "is really budget for you to walk over and switch them on")
     args = ap.parse_args()
 
     trial = args.trial or datetime.now().strftime("%H%M%S")
@@ -151,16 +189,31 @@ def main():
     rates = master.supportedUpdateRates()
     rates = [rates[i] for i in range(rates.size())]
     rate = min(rates, key=lambda r: abs(r - DESIRED_RATE)) if rates else DESIRED_RATE
-    master.setUpdateRate(rate)
-    print(f"Update rate: {rate} Hz  (supported: {rates})")
 
-    if master.isRadioEnabled():
-        master.disableRadio()
-    if not master.enableRadio(RADIO_CHANNEL):
-        raise RuntimeError(f"enableRadio({RADIO_CHANNEL}) failed")
+    # The master only accepts a new update rate while its radio is down, and
+    # setUpdateRate() reports failure by return value rather than raising -- so
+    # an unchecked call on a live radio silently leaves the old rate in place.
+    # Only cycle the radio when the rate actually has to change, since dropping
+    # it powers every MTw off.
+    if master.updateRate() != rate:
+        if master.isRadioEnabled():
+            print(f"  changing update rate to {rate} Hz -- this drops the radio, "
+                  f"so the MTws will need switching on again")
+            master.disableRadio()
+        if not master.setUpdateRate(rate):
+            raise RuntimeError(f"setUpdateRate({rate}) failed")
+
+    if not master.isRadioEnabled():
+        if not master.enableRadio(RADIO_CHANNEL):
+            raise RuntimeError(f"enableRadio({RADIO_CHANNEL}) failed")
+
+    rate = master.updateRate()   # what the master will actually deliver
+    print(f"Update rate: {rate} Hz  (supported: {rates})")
 
     expected = len(SENSOR_MAP)
     print(f"Radio on (channel {RADIO_CHANNEL}). Waiting for {expected} sensors...")
+    print(f"  SWITCH THE MTws ON NOW if they aren't already -- they join within "
+          f"seconds of powering up.\n  Giving up after {args.connect_timeout:.0f}s.")
     count, last_change, start = 0, time.time(), time.time()
     while True:
         now = time.time()
@@ -173,8 +226,14 @@ def main():
         if now - last_change > 4.0 and n > 0:
             print(f"  settled at {n}/{expected}")
             break
-        if now - start > 60:
-            raise RuntimeError(f"Only {n} sensors connected")
+        if now - start > args.connect_timeout:
+            raise RuntimeError(
+                f"Only {n} sensors connected after {args.connect_timeout:.0f}s")
+        # Nothing joining yet looks identical to a hang otherwise, which is how
+        # a too-short timeout gets mistaken for dead hardware.
+        if n == 0 and int(now - start) % 10 == 0 and now - start >= 10:
+            print(f"  still waiting... {now - start:.0f}s", flush=True)
+            time.sleep(1.0)
         time.sleep(0.2)
 
     mtb_path = os.path.join(out_dir, "session.mtb")
@@ -205,15 +264,12 @@ def main():
         recorders[seg] = rec
 
         info = {"device_id": key}
-        for label, fn in (("acc_range_g", "actualAccelerometerRange"),
-                          ("gyr_range_dps", "actualGyroscopeRange"),
-                          ("product_code", "productCode"),
-                          ("firmware", "firmwareVersion")):
-            try:
-                v = getattr(dev, fn)()
-                info[label] = str(v) if not isinstance(v, (int, float)) else v
-            except Exception as e:
-                info[label] = f"unavailable ({e})"
+        for label, names in (
+                ("acc_range_g", ("actualAccelerometerRange", "accelerometerRange")),
+                ("gyr_range_dps", ("actualGyroscopeRange", "gyroscopeRange")),
+                ("product_code", ("productCode",)),
+                ("firmware", ("firmwareVersion",))):
+            info[label] = device_property(dev, names)
         sensors[seg] = info
 
     print(f"Recording {len(recorders)} sensors.")
@@ -248,7 +304,15 @@ def main():
         master.stopRecording()
         master.closeLogFile()
     master.gotoConfig()
-    master.disableRadio()
+    if args.release_radio:
+        master.disableRadio()
+        print("  radio off -- all MTws powered down")
+    else:
+        # Dropping the radio powers every MTw off, so the next take would need
+        # all 17 switched on by hand again. Leave the link up by default.
+        master.setGotoConfigOnClose(False)
+        print("  radio left on -- MTws stay powered for the next take "
+              "(--release-radio to power them down)")
 
     print(f"\nWriting to {out_dir}")
     stats = {}
