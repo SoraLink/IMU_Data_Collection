@@ -150,3 +150,34 @@ IMU 四元数的参考系是**磁北**，不是屏幕。渲染把每段旋转从
 3. 偏移量 = 视频时间 − `(counter − take_start_counter) / update_rate_hz`。
 4. 用 `jump_out` 复核一遍。两端算出的偏移若差异明显，说明这个 take
    存在时钟漂移或丢包，需要单独处理。
+
+## 加工后数据(可直接喂模型)
+
+`postprocess.py` 把一个 take 的原始 CSV 转成 sparse-IMU 姿态模型(TransPose /
+DIP 等)要的格式,输出到该 take 的 `processed/` 目录。**原始 CSV 不动**,这是
+额外多给的一份。
+
+```bash
+python3 postprocess.py data/S01/20260916_session1/take01_squat      # 单个 take
+python3 postprocess.py --session data/S01/20260916_session1         # 整个 session
+```
+
+产物:
+
+- **`calibrated.npz`**(与模型无关,17 段全有):
+  - `ori_smpl (T,17,3,3)` —— 每段标定到骨骼(SMPL)系的朝向(旋转矩阵)
+  - `acc_free_smpl (T,17,3)` —— 去重力后的加速度,骨骼系
+  - `gyr (T,17,3)` —— 角速度
+  - `segment_order`(17 段顺序,pelvis 最后)、`counter_grid`(规整 60Hz 时间轴)、
+    `smpl2imu` / `gravity` / `acc_scale`(所用标定)
+- **`transpose_input.npy`** `(T,72) = [18 加速度 | 54 朝向]` —— TransPose live-demo
+  的 6 传感器输入布局(根相对,自包含,无需外部统计文件)
+
+处理步骤:选段 → 四元数转旋转矩阵 → T-pose 标定 sensor-to-bone → 解析法去重力
+(`a·R − [0,0,9.81]`)→ 按 packet counter 对齐、**丢包缺口插值补齐** → 规整到
+60Hz → 根相对归一化(喂模型这步本身朝向无关)。
+
+**标定的已知近似**(见 `postprocess.py` 顶部注释):device2bone 用"T-pose 时骨骼
+= 单位"的假设;smpl2imu 让骨盆 T-pose 朝向对齐 SMPL 前方。格式和物理量(单位、
+坐标系、去重力、丢包、频率)是准的;但"某个预训练模型能否直接吃出好姿势"需要
+拿它的权重实际跑才能确认,本脚本不保证这一点。

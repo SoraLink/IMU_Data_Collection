@@ -13,3 +13,6 @@ vm/recovered/
 
 # vim swap files
 *.swp
+
+# 派生的加工数据(由 postprocess.py 生成)
+data/**/processed/
