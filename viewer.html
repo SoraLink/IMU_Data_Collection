@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>IMU 采集台</title>
+<style>
+  :root {
+    --bg: #f4f6f8; --panel: #ffffff; --line: #e1e6ec;
+    --text: #1a1f26; --dim: #6b7280;
+    --idle: #6b7280; --tpose: #2563eb; --jump: #059669;
+    --action: #d97706; --bad: #dc2626;
+    --grid: #e6eaef; --hl: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    display: grid; grid-template-rows: auto 1fr auto; height: 100vh;
+  }
+
+  /* Stage banner: the one thing readable from across the room. */
+  #banner {
+    padding: 18px 24px; text-align: center; font-size: 34px; font-weight: 700;
+    letter-spacing: .02em; background: var(--idle); color: #fff;
+    transition: background .15s;
+  }
+  #banner small { display: block; font-size: 15px; font-weight: 400;
+                  color: rgba(255,255,255,.85); margin-top: 6px;
+                  letter-spacing: 0; }
+  /* The countdown has to be legible from the far side of the capture volume. */
+  #countdown { display: block; font-size: 92px; font-weight: 800; line-height: 1;
+               font-variant-numeric: tabular-nums; margin-top: 4px; }
+  #countdown:empty { display: none; }
+  #countdown.lead { color: #fff; }
+  #countdown.run  { color: rgba(255,255,255,.55); font-size: 56px; }
+
+  #main { display: grid; grid-template-columns: 1fr 300px; min-height: 0; }
+  #stage { position: relative; min-height: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  #side { border-left: 1px solid var(--line); padding: 16px;
+          overflow-y: auto; background: var(--panel); }
+  .row { display: flex; justify-content: space-between; gap: 10px;
+         padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .row span:first-child { color: var(--dim); }
+  .row span:last-child { font-variant-numeric: tabular-nums; }
+  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--dim); margin: 18px 0 8px; }
+  .bad { color: var(--bad); }
+  .good { color: var(--jump); }
+
+  /* Strap-up table: you are holding a sensor and need to know where it goes. */
+  #sensors { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #sensors td { padding: 4px 4px; border-bottom: 1px solid var(--line); }
+  #sensors tr { cursor: pointer; }
+  #sensors tr:hover { background: #eef2f7; }
+  #sensors tr.hl { background: #fdf0d5; }
+  .dev { font: 12px ui-monospace, "SF Mono", monospace; color: #33507a;
+         letter-spacing: -.02em; }
+  .part { white-space: nowrap; }
+  .seg { color: var(--dim); font-size: 11px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%;
+         background: var(--jump); display: inline-block; }
+  tr.off .dot { background: var(--bad); }
+  tr.off .dev, tr.off .part { color: var(--bad); }
+  #sortbtn { font-size: 11px; padding: 2px 8px; background: #eef2f7;
+             color: var(--dim); border-radius: 4px; float: right;
+             font-weight: 400; }
+
+  #controls { padding: 14px 24px; background: var(--panel);
+              border-top: 1px solid var(--line);
+              display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  button { font: inherit; font-weight: 600; padding: 10px 18px; border: 0;
+           border-radius: 7px; background: #e6eaef; color: var(--text);
+           cursor: pointer; }
+  button:hover:not(:disabled) { background: #d8dee6; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { background: var(--tpose); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #1d4ed8; }
+  button.danger  { background: #fee2e2; color: var(--bad); }
+  button.danger:hover:not(:disabled) { background: #fecaca; }
+  input[type=text] { font: inherit; padding: 10px 12px; border-radius: 7px;
+                     border: 1px solid #cbd3dc; background: #fff;
+                     color: var(--text); }
+  input[type=text]:focus { outline: 2px solid var(--tpose); outline-offset: -1px; }
+  #subjectIn { width: 150px; }
+  #action { width: 230px; }
+  label { font-size: 12px; color: var(--dim); }
+  kbd { font: 12px ui-monospace, monospace; background: #f1f4f8;
+        border: 1px solid #d5dbe3; border-radius: 4px; padding: 1px 5px;
+        color: var(--dim); }
+  #hint { color: var(--dim); font-size: 13px; margin-left: auto; }
+  .hdg { padding: 6px 10px; font-size: 13px; }
+  .hdg.on { background: var(--tpose); color: #fff; }
+  #offline { position: absolute; inset: 0; display: none;
+             align-items: center; justify-content: center; font-size: 20px;
+             background: rgba(255,255,255,.9); color: var(--bad); }
+</style>
+</head>
+<body>
+
+<div id="banner">连接中…<span id="countdown"></span><small id="sub"></small></div>
+
+<div id="main">
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="offline">与采集器的连接已断开</div>
+  </div>
+  <div id="side">
+    <div class="row"><span>被试</span><span id="subject">—</span></div>
+    <div class="row"><span>Session</span><span id="session">—</span></div>
+    <div class="row"><span>当前 take</span><span id="take">—</span></div>
+    <div class="row"><span>已完成</span><span id="done">0</span></div>
+    <div class="row"><span>采样率</span><span id="rate">—</span></div>
+    <div class="row"><span>本阶段</span><span id="elapsed">0.0s</span></div>
+    <div class="row"><span>T-pose 基准</span><span id="calib">未标定</span></div>
+
+    <h3>传感器编号 <span id="livecount"></span>
+        <button id="sortbtn">按编号排</button></h3>
+    <table id="sensors"></table>
+
+    <h3>节奏设置</h3>
+    <label style="display:flex;align-items:center;gap:8px;padding:4px 0">
+      <input type="checkbox" id="autoChk" checked>
+      <span>阶段按时长自动结束（自己录自己时必开）</span>
+    </label>
+    <div id="timings"></div>
+
+    <h3>上一个 take</h3>
+    <div id="lasttake" style="font-size:13px;color:var(--dim)">尚无</div>
+  </div>
+</div>
+
+<div id="controls">
+  <label for="subjectIn">被试 ID</label>
+  <input type="text" id="subjectIn" placeholder="如 S01" autocomplete="off">
+  <button id="btnSubject">设定</button>
+  <input type="text" id="action" placeholder="动作名称，如 jump_forward"
+         autocomplete="off">
+  <button id="btnStart" class="primary">开始 take <kbd>n</kbd></button>
+  <button id="btnNext" disabled>下一阶段 <kbd>空格</kbd></button>
+  <button id="btnRedo" class="danger" disabled>重录 <kbd>r</kbd></button>
+  <span style="border-left:1px solid var(--line);padding-left:14px">
+    <label>朝向自动跟随；偏了可微调</label>
+    <button class="hdg" data-deg="0">复位</button>
+    <button class="hdg" data-deg="90">+90°</button>
+    <button class="hdg" data-deg="180">+180°</button>
+    <button class="hdg" data-deg="270">+270°</button>
+  </span>
+  <span id="hint">按键在页面任意处生效（输入框内除外）</span>
+</div>
+
+<script>
+"use strict";
+
+const STAGE_TEXT = {
+  CONNECTING: ["等待传感器连接…", "var(--idle)"],
+  IDLE:       ["待机 — 输入动作名后开始", "var(--idle)"],
+  WAITING:    ["准备好后点「下一阶段」", "var(--idle)"],
+  T_POSE:     ["T-POSE — 站稳不动", "var(--tpose)"],
+  JUMP_IN:    ["原地跳一下！", "var(--jump)"],
+  ACTION:     ["做动作", "var(--action)"],
+  JUMP_OUT:   ["原地跳一下！", "var(--jump)"],
+  SAVING:     ["保存中…", "var(--idle)"],
+};
+// Shown during the lead-in, so the subject knows what is about to start.
+const READY_TEXT = {
+  T_POSE:   "准备摆 T-POSE",
+  JUMP_IN:  "准备原地跳 ①",
+  ACTION:   "准备做动作",
+  JUMP_OUT: "准备原地跳 ②",
+};
+const STAGES = ["T_POSE", "JUMP_IN", "ACTION", "JUMP_OUT"];
+const IN_TAKE = ["WAITING", ...STAGES];
+const NEXT_LABEL = {
+  T_POSE:   "开始 T-POSE",
+  JUMP_IN:  "开始跳跃 ①",
+  ACTION:   "开始动作",
+  JUMP_OUT: "开始跳跃 ②",
+};
+
+let latest = null, lastStage = null;
+
+// ---------------------------------------------------------------- audio cue
+// The subject is across the room facing away from the screen, so every stage
+// change gets a distinct tone. Generated rather than loaded so the page stays
+// a single file with no assets.
+let audio = null;
+function tone(freq, ms, delay = 0) {
+  if (!audio) return;
+  const osc = audio.createOscillator(), gain = audio.createGain();
+  const t0 = audio.currentTime + delay;
+  osc.frequency.value = freq;
+  osc.type = "sine";
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + ms / 1000);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(t0); osc.stop(t0 + ms / 1000 + 0.02);
+}
+const CUE = {
+  PREPARE:  () => tone(520, 200),
+  T_POSE:   () => tone(660, 320),
+  JUMP_IN:  () => { tone(1320, 200); tone(1760, 260, 0.2); },
+  ACTION:   () => tone(440, 320),
+  JUMP_OUT: () => { tone(1320, 200); tone(1760, 260, 0.2); },
+  IDLE:     () => { tone(1320, 90); tone(990, 140, 0.11); },
+};
+
+// One tick per remaining second. Keyed on the integer so a 30 Hz feed still
+// produces exactly one beep per second.
+let lastTick = null;
+function beepFor(s) {
+  const secs = Math.ceil(s.remaining);
+  const key = `${s.state}:${s.counting}:${secs}`;
+  if (key === lastTick) return;
+  lastTick = key;
+  if (!s.counting) return;              // only the lead-in ticks
+  if (secs <= 0) return;                // the stage cue itself covers zero
+  tone(secs <= 3 ? 1100 : 780, 70);
+}
+
+// ------------------------------------------------------------------ drawing
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+let azimuth = -0.15, elevation = 0.18, dragging = null;
+
+function resize() {
+  const r = canvas.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  canvas.width = r.width * dpr;
+  canvas.height = r.height * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+addEventListener("resize", resize);
+
+canvas.addEventListener("pointerdown", e => {
+  dragging = { x: e.clientX, y: e.clientY };
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener("pointermove", e => {
+  if (!dragging) return;
+  azimuth   += (e.clientX - dragging.x) * 0.008;
+  elevation += (e.clientY - dragging.y) * 0.008;
+  elevation = Math.max(-1.3, Math.min(1.3, elevation));
+  dragging = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener("pointerup", () => { dragging = null; });
+
+// World axes are +X right, +Y forward, +Z up. Project to screen with a fixed
+// camera distance; the skeleton is ~1.8 m tall so the scale is chosen to fit.
+function project(p, w, h) {
+  const [x, y, z] = p;
+  const ca = Math.cos(azimuth), sa = Math.sin(azimuth);
+  const rx = x * ca - y * sa, ry = x * sa + y * ca;
+  const ce = Math.cos(elevation), se = Math.sin(elevation);
+  const depth = ry * ce - z * se + 4.0;
+  const up = ry * se + z * ce;
+  const f = Math.min(w, h) * 0.9;
+  return [w / 2 + (rx / depth) * f, h / 2 - (up / depth) * f, depth];
+}
+
+function draw() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+
+  // Ground grid, so orientation and the jump are readable.
+  ctx.strokeStyle = "#e0e5eb"; ctx.lineWidth = 1;
+  for (let i = -3; i <= 3; i++) {
+    const a = project([i * 0.4, -1.2, -0.95], w, h);
+    const b = project([i * 0.4,  1.2, -0.95], w, h);
+    const c = project([-1.2, i * 0.4, -0.95], w, h);
+    const d = project([ 1.2, i * 0.4, -0.95], w, h);
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(c[0], c[1]); ctx.lineTo(d[0], d[1]); ctx.stroke();
+  }
+
+  const bones = latest && latest.bones ? latest.bones : [];
+  // Painter's algorithm: far bones first, so near limbs overlap correctly.
+  const drawn = bones.map(b => {
+    const p = project([b[0], b[1], b[2]], w, h);
+    const q = project([b[3], b[4], b[5]], w, h);
+    return { p, q, colour: b[6], seg: b[7], depth: (p[2] + q[2]) / 2 };
+  }).sort((m, n) => n.depth - m.depth);
+
+  ctx.lineCap = "round";
+  for (const s of drawn) {
+    const lit = s.seg === highlight;
+    if (lit) {                       // halo first, so the bone sits on top of it
+      ctx.strokeStyle = "#f59e0b";   // amber, not white: the page is white
+      ctx.lineWidth = 17;
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      ctx.moveTo(s.p[0], s.p[1]);
+      ctx.lineTo(s.q[0], s.q[1]);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    ctx.strokeStyle = lit ? "#7c2d12" : s.colour;
+    ctx.lineWidth = lit ? 9 : 7;
+    ctx.beginPath();
+    ctx.moveTo(s.p[0], s.p[1]);
+    ctx.lineTo(s.q[0], s.q[1]);
+    ctx.stroke();
+  }
+  requestAnimationFrame(draw);
+}
+
+// -------------------------------------------------------------------- state
+function render(s) {
+  const [text, colour] = STAGE_TEXT[s.state] || [s.state, "var(--idle)"];
+  const banner = document.getElementById("banner");
+  let title = text;
+  if (s.state === "IDLE" && !s.subject) title = "请先设定被试 ID";
+  else if (s.state === "WAITING" && s.pending) {
+    title = "准备好后点「" + (NEXT_LABEL[s.pending] || s.pending) + "」";
+  } else if (s.counting) title = READY_TEXT[s.state] || text;
+  banner.firstChild.nodeValue = title;
+  banner.style.background = s.counting ? "var(--idle)" : colour;
+
+  // A big number is the only thing usable from across the room mid-take.
+  const cd = document.getElementById("countdown");
+  if (s.remaining !== null && s.remaining !== undefined) {
+    cd.textContent = Math.ceil(s.remaining);
+    cd.className = s.counting ? "lead" : "run";
+    beepFor(s);
+  } else {
+    cd.textContent = "";
+    cd.className = "";
+  }
+
+  document.getElementById("sub").textContent =
+    s.state === "CONNECTING" ? (s.message || "")
+      : (s.take ? `take ${String(s.take).padStart(2, "0")} · ${s.action}` : "");
+
+  // Leave the field alone while it is being edited, or typing fights the feed.
+  if (document.activeElement !== subjectInput) {
+    subjectInput.value = s.subject || "";
+  }
+  document.getElementById("subject").textContent = s.subject || "—";
+  document.getElementById("session").textContent = s.session || "—";
+  document.getElementById("take").textContent =
+    s.take ? `${String(s.take).padStart(2, "0")} ${s.action}` : "—";
+  document.getElementById("done").textContent = s.takes_done;
+  document.getElementById("rate").textContent = s.rate_hz ? s.rate_hz + " Hz" : "—";
+  document.getElementById("elapsed").textContent = s.stage_elapsed.toFixed(1) + "s";
+
+  const calib = document.getElementById("calib");
+  if (!s.calibrated) {
+    calib.textContent = "未标定"; calib.className = "bad";
+  } else if (s.tpose_sway !== null && s.tpose_sway > 10) {
+    // A held T-pose sways a degree or two; tens of degrees means the pose
+    // was still being assumed while the reference was averaged.
+    calib.textContent = `⚠ 晃动 ${s.tpose_sway}° 建议重录`; calib.className = "bad";
+  } else {
+    calib.textContent = s.tpose_sway !== null
+      ? `已标定 (晃动 ${s.tpose_sway}°)` : "已标定";
+    calib.className = "good";
+  }
+
+  const live = document.getElementById("livecount");
+  live.textContent = `${s.live}/${s.expected}`;
+  live.className = s.live < s.expected ? "bad" : "good";
+
+  const missing = new Set(s.missing || []);
+  for (const tr of document.querySelectorAll("#sensors tr")) {
+    tr.classList.toggle("off", missing.has(tr.dataset.seg));
+  }
+
+  const lt = document.getElementById("lasttake");
+  if (s.last_take) {
+    const t = s.last_take, j = t.jump_sync || {};
+    const flag = k => !j[k] ? "无数据"
+      : (j[k].detected ? "已检出" : "⚠ 信号弱");
+    lt.innerHTML =
+      `take ${String(t.take).padStart(2, "0")} ${t.action}<br>` +
+      `时长 ${t.duration_s}s · 丢包 ${t.worst_loss_pct}%<br>` +
+      `跳跃① ${flag("jump_in")} · 跳跃② ${flag("jump_out")}`;
+  }
+
+  // Which controls make sense depends on the stage.
+  for (const b of document.querySelectorAll(".hdg")) {
+    b.classList.toggle("on", (s.view_offset_deg ?? 0) === parseInt(b.dataset.deg));
+  }
+
+  if (!timingBuilt && s.durations) buildTimings(s);
+  const autoChk = document.getElementById("autoChk");
+  if (document.activeElement !== autoChk) autoChk.checked = !!s.auto;
+  autoChk.disabled = s.state !== "IDLE";
+  for (const i of document.querySelectorAll("#timings input")) {
+    i.disabled = s.state !== "IDLE";
+    if (document.activeElement !== i) {
+      i.value = (s[i.dataset.kind] || {})[i.dataset.key];
+    }
+  }
+
+  document.getElementById("btnStart").disabled = s.state !== "IDLE" || !s.subject;
+  document.getElementById("btnSubject").disabled = s.state !== "IDLE";
+  const next = document.getElementById("btnNext");
+  next.disabled = !IN_TAKE.includes(s.state);
+  next.className = s.state === "WAITING" ? "primary" : "";
+  next.innerHTML = (s.state === "WAITING" && s.pending
+    ? (NEXT_LABEL[s.pending] || "下一阶段") : "下一阶段") + ' <kbd>空格</kbd>';
+  document.getElementById("btnRedo").disabled = !IN_TAKE.includes(s.state);
+
+  if (s.state !== lastStage) {
+    lastStage = s.state;
+    (CUE[s.state] || (() => {}))();
+  }
+}
+
+// ------------------------------------------------------------- strap-up table
+// Fetched once; the device-to-body mapping never changes during a session.
+let roster = [], byDevice = false, highlight = null;
+
+function renderRoster() {
+  const rows = byDevice
+    ? [...roster].sort((a, b) => a.device.localeCompare(b.device))
+    : roster;                       // server order is head-down, i.e. strap order
+  const table = document.getElementById("sensors");
+  table.innerHTML = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.dataset.seg = r.segment;
+    tr.innerHTML =
+      `<td><span class="dot"></span></td>` +
+      `<td class="dev">${r.device}</td>` +
+      `<td class="part">${r.label}<div class="seg">${r.segment}</div></td>`;
+    // Hovering a row lights up that bone, so you can find the spot without
+    // having to know the English segment names.
+    tr.onmouseenter = () => { highlight = r.segment; tr.classList.add("hl"); };
+    tr.onmouseleave = () => { highlight = null; tr.classList.remove("hl"); };
+    table.appendChild(tr);
+  }
+}
+
+// ------------------------------------------------------------ timing panel
+const TIMING_ROWS = [
+  ["T_POSE",    "T-pose"],
+  ["JUMP_IN",   "跳跃 ①"],
+  ["ACTION",    "动作"],
+  ["JUMP_OUT",  "跳跃 ②"],
+];
+let timingBuilt = false;
+
+function numBox(kind, stage, value) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = value;
+  input.dataset.kind = kind;
+  input.dataset.key = stage;
+  input.style.width = "48px";
+  input.style.padding = "3px 6px";
+  input.style.textAlign = "right";
+  input.onchange = () => {
+    const v = parseFloat(input.value);
+    if (!isFinite(v) || v < 0) { input.value = value; return; }
+    send({ cmd: "set_config", [kind]: { [stage]: v } });
+  };
+  return input;
+}
+
+function buildTimings(s) {
+  const box = document.getElementById("timings");
+  box.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "row";
+  head.innerHTML = `<span></span><span style="font-size:11px">倒计时 / 时长</span>`;
+  box.appendChild(head);
+  for (const [stage, label] of TIMING_ROWS) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<span>${label}</span>`;
+    const cell = document.createElement("span");
+    cell.style.display = "flex";
+    cell.style.gap = "4px";
+    cell.appendChild(numBox("leads", stage, (s.leads || {})[stage]));
+    cell.appendChild(numBox("durations", stage, (s.durations || {})[stage]));
+    row.appendChild(cell);
+    box.appendChild(row);
+  }
+  timingBuilt = true;
+}
+
+for (const b of document.querySelectorAll(".hdg")) {
+  b.onclick = () => send({ cmd: "set_config",
+                           view_offset_deg: parseInt(b.dataset.deg) });
+}
+
+document.getElementById("autoChk").onchange = e =>
+  send({ cmd: "set_config", auto: e.target.checked });
+
+document.getElementById("sortbtn").onclick = e => {
+  e.stopPropagation();
+  byDevice = !byDevice;
+  e.target.textContent = byDevice ? "按部位排" : "按编号排";
+  renderRoster();
+};
+
+fetch("/roster").then(r => r.json()).then(r => { roster = r; renderRoster(); })
+  .catch(() => {});
+
+// ------------------------------------------------------------------ commands
+async function send(cmd) {
+  // A click means the operator is present, which is when a browser permits
+  // audio to start.
+  if (!audio) { try { audio = new AudioContext(); } catch (e) { /* no audio */ } }
+  try {
+    await fetch("/cmd", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cmd),
+    });
+  } catch (e) { /* the event stream will show the disconnect */ }
+}
+
+const actionInput = document.getElementById("action");
+const subjectInput = document.getElementById("subjectIn");
+
+function startTake() {
+  if (latest && latest.state !== "IDLE") return;
+  if (!latest || !latest.subject) {
+    alert("请先设定被试 ID");
+    subjectInput.focus();
+    return;
+  }
+  send({ cmd: "start", action: actionInput.value.trim() });
+  actionInput.blur();
+}
+
+function setSubject() {
+  const id = subjectInput.value.trim();
+  if (!id) return;
+  // Switching subject re-points the output directory and restarts take
+  // numbering, so make it deliberate rather than a stray keystroke.
+  if (latest && latest.subject && latest.subject !== id && latest.takes_done &&
+      !confirm(`当前被试 ${latest.subject} 已录 ${latest.takes_done} 个 take。\n` +
+               `切换到 ${id} 会新建一个 session 目录，take 编号从 01 重新开始。\n继续？`)) {
+    subjectInput.value = latest.subject;
+    return;
+  }
+  send({ cmd: "set_subject", subject: id });
+  subjectInput.blur();
+}
+
+document.getElementById("btnStart").onclick = startTake;
+document.getElementById("btnSubject").onclick = setSubject;
+document.getElementById("btnNext").onclick = () => send({ cmd: "advance" });
+document.getElementById("btnRedo").onclick = () => {
+  if (confirm("丢弃当前 take 重录？")) send({ cmd: "redo" });
+};
+
+addEventListener("keydown", e => {
+  // Never steal keys while something is being typed.
+  if (e.target === actionInput) {
+    if (e.key === "Enter") startTake();
+    return;
+  }
+  if (e.target === subjectInput) {
+    if (e.key === "Enter") setSubject();
+    return;
+  }
+  if (e.key === "n") { actionInput.focus(); actionInput.select(); }
+  else if (e.key === " ") { e.preventDefault(); if (IN_TAKE.includes(latest?.state)) send({ cmd: "advance" }); }
+  else if (e.key === "r") { if (IN_TAKE.includes(latest?.state) && confirm("丢弃当前 take 重录？")) send({ cmd: "redo" }); }
+});
+
+// -------------------------------------------------------------------- stream
+const offline = document.getElementById("offline");
+function connect() {
+  const es = new EventSource("/events");
+  es.onmessage = ev => {
+    latest = JSON.parse(ev.data);
+    offline.style.display = "none";
+    render(latest);
+  };
+  es.onerror = () => {
+    offline.style.display = "flex";
+    // EventSource retries on its own; closing here would defeat that.
+  };
+}
+
+resize();
+draw();
+connect();
+</script>
+</body>
+</html>

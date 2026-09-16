@@ -30,82 +30,8 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3d projection)
 import xsensdeviceapi as xda
 
 
-# ---------------------------------------------------------------------------
-# Sensor -> body segment mapping (17-sensor full body).
-# ---------------------------------------------------------------------------
-SENSOR_MAP = {
-    "00B4F79F": "head",             # 头
-    "00B4F79C": "sternum",          # 前胸
-    "00B4F7A1": "pelvis",           # 骨盆
-    "00B4F79B": "right_shoulder",   # 右肩胛
-    "00B4F773": "right_upperarm",   # 右大臂
-    "00B4F7A8": "right_forearm",    # 右小臂
-    "00B4F79D": "right_hand",       # 右手
-    "00B4F775": "left_shoulder",    # 左肩胛
-    "00B4F7A3": "left_upperarm",    # 左大臂
-    "00B4F7B6": "left_forearm",     # 左小臂
-    "00B4F7A0": "left_hand",        # 左手
-    "00B4F7A7": "right_thigh",      # 右大腿
-    "00B4F7A2": "right_shank",      # 右小腿
-    "00B4F184": "right_foot",       # 右脚
-    "00B4F7A5": "left_thigh",       # 左大腿
-    "00B4F7A6": "left_shank",       # 左小腿
-    "00B4F79E": "left_foot",        # 左脚
-}
-
-# ---------------------------------------------------------------------------
-# Skeleton. Axes: +X = subject's right, +Y = forward, +Z = up.
-#
-# Each entry is (parent, offset), where offset is the vector from the parent's
-# proximal joint to this segment's proximal joint. Because calibration forces
-# every bone rotation to identity at T-pose time, these offsets ARE the T-pose:
-# arms straight out sideways, legs straight down.
-# ---------------------------------------------------------------------------
-SKELETON = {
-    "pelvis":          (None,             np.array([0.00,  0.00,  0.00])),
-    "sternum":         ("pelvis",         np.array([0.00,  0.00,  0.22])),
-    "head":            ("sternum",        np.array([0.00,  0.00,  0.30])),
-
-    "right_shoulder":  ("sternum",        np.array([0.03,  0.00,  0.26])),
-    "right_upperarm":  ("right_shoulder", np.array([0.15,  0.00,  0.00])),
-    "right_forearm":   ("right_upperarm", np.array([0.28,  0.00,  0.00])),
-    "right_hand":      ("right_forearm",  np.array([0.26,  0.00,  0.00])),
-
-    "left_shoulder":   ("sternum",        np.array([-0.03, 0.00,  0.26])),
-    "left_upperarm":   ("left_shoulder",  np.array([-0.15, 0.00,  0.00])),
-    "left_forearm":    ("left_upperarm",  np.array([-0.28, 0.00,  0.00])),
-    "left_hand":       ("left_forearm",   np.array([-0.26, 0.00,  0.00])),
-
-    "right_thigh":     ("pelvis",         np.array([0.09,  0.00, -0.06])),
-    "right_shank":     ("right_thigh",    np.array([0.00,  0.00, -0.44])),
-    "right_foot":      ("right_shank",    np.array([0.00,  0.00, -0.43])),
-
-    "left_thigh":      ("pelvis",         np.array([-0.09, 0.00, -0.06])),
-    "left_shank":      ("left_thigh",     np.array([0.00,  0.00, -0.44])),
-    "left_foot":       ("left_shank",     np.array([0.00,  0.00, -0.43])),
-}
-
-# Leaf segments need an explicit end point so they render as a bone, not a dot.
-TIPS = {
-    "head":       np.array([0.00,  0.00,  0.22]),
-    "right_hand": np.array([0.18,  0.00,  0.00]),
-    "left_hand":  np.array([-0.18, 0.00,  0.00]),
-    "right_foot": np.array([0.00,  0.20, -0.04]),
-    "left_foot":  np.array([0.00,  0.20, -0.04]),
-}
-
-# Colour by body part so left/right are distinguishable at a glance.
-TORSO = "#3E4C59"
-RIGHT = "#D06A12"
-LEFT = "#1F7A99"
-
-
-def limb_colour(seg):
-    if seg.startswith("right_"):
-        return RIGHT
-    if seg.startswith("left_"):
-        return LEFT
-    return TORSO
+from skeleton import (SENSOR_MAP, SKELETON, TIPS, BONES, TIP_BONES,
+                      limb_colour, joint_positions, yaw_of, bone_rotations)
 
 
 DESIRED_RATE = 60      # Hz; the closest supported rate is picked automatically
@@ -121,33 +47,6 @@ def beep(freq, ms):
         winsound.Beep(freq, ms)
     except RuntimeError:
         pass
-
-
-# ---------------------------------------------------------------------------
-# Quaternion helpers (w, x, y, z)
-# ---------------------------------------------------------------------------
-def q_conj(q):
-    return np.array([q[0], -q[1], -q[2], -q[3]])
-
-
-def q_mul(a, b):
-    w1, x1, y1, z1 = a
-    w2, x2, y2, z2 = b
-    return np.array([
-        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-    ])
-
-
-def q_to_R(q):
-    w, x, y, z = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y)],
-        [2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-        [2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y)],
-    ])
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +89,7 @@ def find_master(retries=5, delay=1.0):
     )
 
 
-def connect(settle=4.0, timeout=60.0):
+def connect(settle=4.0, timeout=300.0):
     """Follow the official MTw startup sequence. Returns (control, master, callbacks)
     where callbacks maps segment name -> MtwCallback."""
     control, port = find_master()
@@ -206,16 +105,28 @@ def connect(settle=4.0, timeout=60.0):
     rates = master.supportedUpdateRates()
     rates = [rates[i] for i in range(rates.size())]
     rate = min(rates, key=lambda r: abs(r - DESIRED_RATE)) if rates else DESIRED_RATE
-    print(f"Supported update rates: {rates} -> using {rate} Hz")
-    if not master.setUpdateRate(rate):
-        raise RuntimeError(f"setUpdateRate({rate}) failed")
 
-    if master.isRadioEnabled():
-        master.disableRadio()
-    if not master.enableRadio(RADIO_CHANNEL):
-        raise RuntimeError(f"enableRadio({RADIO_CHANNEL}) failed -- try another channel")
+    # The rate can only be changed with the radio down, and dropping the radio
+    # powers every MTw off -- so only cycle it when the rate really must change.
+    if master.updateRate() != rate:
+        if master.isRadioEnabled():
+            print(f"  changing update rate to {rate} Hz -- this drops the radio, "
+                  f"so the MTws will need switching on again")
+            master.disableRadio()
+        if not master.setUpdateRate(rate):
+            raise RuntimeError(f"setUpdateRate({rate}) failed")
+
+    if not master.isRadioEnabled():
+        if not master.enableRadio(RADIO_CHANNEL):
+            raise RuntimeError(
+                f"enableRadio({RADIO_CHANNEL}) failed -- try another channel")
+
+    rate = master.updateRate()
+    print(f"Supported update rates: {rates} -> using {rate} Hz")
 
     print(f"Radio on (channel {RADIO_CHANNEL}). Waiting for {len(SENSOR_MAP)} sensors...")
+    print(f"  SWITCH THE MTws ON NOW if they aren't already -- they join within "
+          f"seconds of powering up.\n  Giving up after {timeout:.0f}s.")
     expected = len(SENSOR_MAP)
     count, last_change, start = 0, time.time(), time.time()
     while True:
@@ -231,6 +142,11 @@ def connect(settle=4.0, timeout=60.0):
             break
         if now - start > timeout:
             raise RuntimeError(f"Only {n} sensors connected after {timeout:.0f}s")
+        # Silence while nothing joins is indistinguishable from a hang, which is
+        # how a too-short timeout gets misread as a hardware fault.
+        if n == 0 and int(now - start) % 10 == 0 and now - start >= 10:
+            print(f"  still waiting... {now - start:.0f}s", flush=True)
+            time.sleep(1.0)
         time.sleep(0.2)
 
     if not master.gotoMeasurement():
@@ -260,35 +176,12 @@ def connect(settle=4.0, timeout=60.0):
     return control, master, callbacks
 
 
-def joint_positions(bone_R):
-    """Walk the skeleton, returning {segment: world position of its proximal joint}."""
-    joints = {}
-
-    def resolve(seg):
-        if seg in joints:
-            return joints[seg]
-        parent, offset = SKELETON[seg]
-        if parent is None:
-            joints[seg] = np.zeros(3)
-        else:
-            joints[seg] = resolve(parent) + bone_R[parent] @ offset
-        return joints[seg]
-
-    for seg in SKELETON:
-        resolve(seg)
-    return joints
-
-
-# Every drawn line: (segment providing the colour, parent joint, child joint or tip)
-BONES = [(seg, parent, seg) for seg, (parent, _) in SKELETON.items() if parent]
-TIP_BONES = [(seg, seg, None) for seg in TIPS]
-
-
 def main():
     control, master, callbacks = connect()
 
-    offsets = {}   # segment -> q0^-1
-    state = {"run": True, "calib_at": None, "beeped": None}
+    offsets = {}   # segment -> orientation captured at T-pose
+    state = {"run": True, "calib_at": None, "beeped": None,
+             "heading": 0.0}
 
     fig = plt.figure(figsize=(7, 8))
     ax = fig.add_subplot(111, projection="3d")
@@ -318,9 +211,15 @@ def main():
         for seg, cb in callbacks.items():
             q = cb.get()
             if q is not None:
-                offsets[seg] = q_conj(q)
+                offsets[seg] = q
                 n += 1
-        print(f"Calibrated {n} sensors.")
+        # The subject's facing direction at T-pose. Without conjugating by it,
+        # the render is only correct when they happen to face heading zero --
+        # face the other way and a raised arm draws pointing down.
+        ref = offsets.get("pelvis")
+        state["heading"] = yaw_of(ref) if ref is not None else 0.0
+        print(f"Calibrated {n} sensors, heading "
+              f"{np.degrees(state['heading']):.0f} deg.")
         beep(1400, 120)
         beep(1800, 200)
 
@@ -339,14 +238,10 @@ def main():
     frames, t0 = 0, time.time()
     try:
         while state["run"] and plt.fignum_exists(fig.number):
-            bone_R = {seg: np.eye(3) for seg in SKELETON}
-            live = 0
-            for seg, cb in callbacks.items():
-                q = cb.get()
-                if q is None or seg not in offsets:
-                    continue
-                bone_R[seg] = q_to_R(q_mul(q, offsets[seg]))
-                live += 1
+            quats = {seg: cb.get() for seg, cb in callbacks.items()}
+            quats = {seg: q for seg, q in quats.items() if q is not None}
+            live = sum(1 for seg in quats if seg in offsets)
+            bone_R = bone_rotations(quats, offsets, state["heading"])
 
             joints = joint_positions(bone_R)
 
@@ -383,9 +278,11 @@ def main():
     finally:
         print("Shutting down...")
         master.gotoConfig()
-        master.disableRadio()
+        # Disabling the radio powers every MTw off, so the next run would need
+        # all 17 switched on by hand again. Leave the link up.
+        master.setGotoConfigOnClose(False)
         control.close()
-        print("Closed.")
+        print("Closed (radio left on, MTws still powered).")
 
 
 if __name__ == "__main__":
