@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+data/
+*_out.txt
+*_err.txt
+*.mtb
