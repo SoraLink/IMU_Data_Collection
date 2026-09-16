@@ -213,13 +213,13 @@ def main():
             if q is not None:
                 offsets[seg] = q
                 n += 1
-        # The subject's facing direction at T-pose. Without conjugating by it,
-        # the render is only correct when they happen to face heading zero --
-        # face the other way and a raised arm draws pointing down.
-        ref = offsets.get("pelvis")
-        state["heading"] = yaw_of(ref) if ref is not None else 0.0
-        print(f"Calibrated {n} sensors, heading "
-              f"{np.degrees(state['heading']):.0f} deg.")
+        # No heading correction: render = R(q_now . q_Tpose^-1), the original
+        # algorithm. Deriving heading from pelvis yaw (magnetic-north-referenced,
+        # not screen-referenced) rotated correct renders off, so it was dropped.
+        # A session that comes out reversed is the known limitation of the
+        # heading-free approach; live it up to the operator, not an auto-guess.
+        state["heading"] = 0.0
+        print(f"Calibrated {n} sensors.")
         beep(1400, 120)
         beep(1800, 200)
 

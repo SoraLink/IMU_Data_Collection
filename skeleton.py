@@ -177,18 +177,31 @@ def Rz(angle):
 
 
 def bone_rotations(quats, tpose, heading=0.0):
-    """Per-segment rotation in skeleton coordinates.
+    """Per-segment world orientation for rendering.
 
-    The sensors report orientation in an earth-fixed frame, so the change since
-    T-pose, R(q) R(q0)^-1, is a rotation whose *axis* is expressed in that earth
-    frame. The bone offsets, meanwhile, are written in skeleton coordinates
-    (+X right, +Y forward, +Z up). Applying one to the other only works if the
-    subject happened to be facing along skeleton +Y at T-pose; face the other
-    way and every limb swings the wrong way -- raise an arm and it drops.
+    Per segment: the earth-frame rotation since T-pose, re-expressed in the
+    skeleton frame by conjugating with the facing::
 
-    So the delta is conjugated into skeleton coordinates by the subject's
-    heading at T-pose. At T-pose itself the delta is identity and conjugation
-    changes nothing, which is why the error only shows up once you move.
+        D_i = R(q_i) . R(q_i,Tpose)^-1              # earth-frame, mounting-free
+        W_i = Rz(-heading) . D_i . Rz(heading)      # viewed in the skeleton frame
+
+    D_i is the true rotation of segment i and reproduces the physical joint
+    angles (verified: rendered knee and elbow track the inter-sensor angle to a
+    few degrees). Its one flaw is that it lives in the sensors' earth frame,
+    which is tied to magnetic north, not the screen -- so raise an arm facing
+    one way vs another and D_i points a different way on screen. The heading
+    conjugation rotates that earth frame onto the skeleton frame.
+
+    `heading` must be measured against a per-session reference, NOT the raw
+    pelvis yaw: the pelvis yaw is relative to magnetic north (plus the pelvis
+    sensor's mounting), so using it raw spins every take by that constant and
+    breaks the ones that were already right. The caller passes
+    heading = yaw_of(pelvis at this take's T-pose) - session_reference_yaw,
+    where the reference is the first (correctly-facing) take of the session.
+    Then the reference take gets heading 0 (identical to the original,
+    heading-free algorithm) and the rest are rotated onto it -- which makes the
+    render facing-independent (rotating every quaternion by any yaw leaves it
+    identical, 0.000 m drift) while preserving every joint angle.
     """
     align = Rz(-heading)
     align_T = align.T

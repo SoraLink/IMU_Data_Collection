@@ -282,7 +282,12 @@ class Session:
         self.takes = []
         self.message = "正在连接硬件..."
         self.tpose_offsets = {}
-        self.heading = 0.0          # auto, from pelvis yaw at each T-pose
+        # Heading = this take's pelvis yaw minus the session reference, so the
+        # first (correctly-facing) take defines forward and later takes are
+        # rotated onto it -- see bone_rotations. The reference is the pelvis yaw
+        # captured at the first take's T-pose; None until then.
+        self.session_ref_yaw = None
+        self.heading = 0.0
         self.view_offset = 0.0      # manual nudge on top, persists across takes
         self.tpose_sway = None
 
@@ -579,21 +584,19 @@ class Session:
                 sway = max(_angle_deg(mean, q) for q in quats)
                 worst = max(worst, sway)
         self.tpose_sway = round(worst, 1)
-        # Heading (which way the subject faced at T-pose) is taken from the
-        # pelvis sensor's yaw. This is the standard sparse-IMU "heading reset":
-        # yaw is the one axis gravity can't give, so it comes from the
-        # magnetometer-fused quaternion. Verified offline on two takes 185 deg
-        # apart -- both rendered limbs correctly. A residual ~15 deg (the pelvis
-        # sensor's own mounting yaw) is a harmless whole-body turn; the manual
-        # view_offset nulls it if wanted. It only reads right on a still T-pose,
-        # which is what the sway check guards.
+        # The first take of the session defines "forward": its pelvis yaw becomes
+        # the reference, and every take (including this first one, heading 0) is
+        # rotated onto it. This keeps the render facing-independent across takes
+        # without needing to know where the screen is -- see bone_rotations.
         ref = self.tpose_offsets.get(REFERENCE_SEGMENT)
-        self.heading = yaw_of(ref) if ref is not None else 0.0
-        quality = ("OK" if worst < 10 else "SUSPECT -- subject was moving, "
-                   "heading may be wrong, consider redo")
+        pelvis_yaw = yaw_of(ref) if ref is not None else 0.0
+        if self.session_ref_yaw is None:
+            self.session_ref_yaw = pelvis_yaw
+        self.heading = pelvis_yaw - self.session_ref_yaw
+        quality = "OK" if worst < 10 else "SUSPECT -- subject was moving, redo"
         print(f"  T-pose captured for {len(self.tpose_offsets)} sensors, "
-              f"heading {np.degrees(self.heading):.0f} deg, "
-              f"max sway {worst:.1f} deg ({quality})")
+              f"max sway {worst:.1f} deg ({quality}), "
+              f"heading {np.degrees(self.heading):+.0f} deg vs session ref")
 
     def set_subject(self, subject):
         """Point the session at a different person.
@@ -611,6 +614,9 @@ class Session:
             self.args.subject = subject
             self.take_index = 0
             self.takes = []
+            # New person = sensors re-donned, so the pelvis mounting (part of the
+            # heading reference) changes; the next take re-establishes forward.
+            self.session_ref_yaw = None
             self.out_dir = os.path.join(OUT_ROOT, subject, self.session_name)
             os.makedirs(self.out_dir, exist_ok=True)
             self.message = "按 n 新建一个 take"
@@ -689,6 +695,9 @@ class Session:
             "jump_sync": jumps,
             "tpose_quat": self.tpose_offsets,
             "tpose_sway_deg": self.tpose_sway,
+            # Render heading (relative to the session's first take) and manual
+            # nudge. The CSVs are raw; these only affect the live skeleton view.
+            "heading_deg": round(float(np.degrees(self.heading)), 1),
             "view_offset_deg": round(float(np.degrees(self.view_offset))) % 360,
             "frames": {
                 "acc": "sensor frame, m/s^2, specific force (gravity included)",
