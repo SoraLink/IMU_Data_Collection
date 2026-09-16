@@ -1,0 +1,34 @@
+#!/usr/bin/expect -f
+# One-time: log in with the cloud-init password and authorise our SSH key, so
+# every later step can run non-interactively over key auth.
+
+set timeout 120
+set port 2222
+set user "xsens"
+set pass "xsens"
+set pubkey [exec cat [file join $env(HOME) .ssh/xsens_vm.pub]]
+
+spawn ssh -p $port \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
+    $user@127.0.0.1 \
+    "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '$pubkey' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && echo KEY_INSTALLED"
+
+expect {
+    -re {[Pp]assword:} {
+        send "$pass\r"
+        exp_continue
+    }
+    "KEY_INSTALLED" {
+        puts "\n>>> public key installed"
+    }
+    timeout {
+        puts "\n>>> timed out waiting for the guest"
+        exit 1
+    }
+    eof {
+        puts "\n>>> connection closed"
+    }
+}

@@ -4,3 +4,12 @@ data/
 *_out.txt
 *_err.txt
 *.mtb
+
+# VM artefacts: multi-hundred-MB downloads and the guest's own disk
+vm/downloads/
+vm/disk.qcow2
+vm/seed.iso
+vm/recovered/
+
+# vim swap files
+*.swp

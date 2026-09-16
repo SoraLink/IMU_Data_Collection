@@ -1,0 +1,8 @@
+#!/bin/bash
+# Shorthand for reaching the guest over the forwarded port with our key.
+exec ssh -p 2222 \
+    -i "$HOME/.ssh/xsens_vm" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    xsens@127.0.0.1 "$@"
